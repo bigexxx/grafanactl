@@ -193,6 +193,66 @@ func pushAlerts(
 	return pushed, failed, nil
 }
 
+func syncDeleteAlerts(
+	ctx context.Context,
+	cfg *config.Context,
+	paths []string,
+	stopOnError bool,
+	dryRun bool,
+) (deleted int, failed int, err error) {
+	localRules, err := readAlertRuleFiles(paths)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	localUIDs := make(map[string]struct{}, len(localRules))
+	for _, r := range localRules {
+		uid := strings.TrimSpace(r.UID)
+		if uid == "" {
+			continue
+		}
+		localUIDs[uid] = struct{}{}
+	}
+
+	gClient, err := grafana.ClientFromContext(cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	listResp, err := gClient.Provisioning.GetAlertRulesWithParams(provisioning.NewGetAlertRulesParams().WithContext(ctx))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	for _, r := range listResp.Payload {
+		uid := strings.TrimSpace(r.UID)
+		if uid == "" {
+			continue
+		}
+
+		if _, ok := localUIDs[uid]; ok {
+			continue
+		}
+
+		if dryRun {
+			deleted++
+			continue
+		}
+
+		if _, err := gClient.Provisioning.DeleteAlertRule(provisioning.NewDeleteAlertRuleParams().WithUID(uid).WithContext(ctx)); err != nil {
+			failed++
+			if stopOnError {
+				return deleted, failed, err
+			}
+			continue
+		}
+
+		deleted++
+	}
+
+	return deleted, failed, nil
+}
+
 func readAlertRuleFiles(paths []string) ([]*models.ProvisionedAlertRule, error) {
 	var rules []*models.ProvisionedAlertRule
 

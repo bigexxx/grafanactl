@@ -13,6 +13,7 @@ import (
 	"github.com/grafana/grafanactl/internal/resources/remote"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type pushOpts struct {
@@ -22,6 +23,7 @@ type pushOpts struct {
 	DryRun            bool
 	OmitManagerFields bool
 	IncludeManaged    bool
+	Sync              bool
 }
 
 func (opts *pushOpts) setup(flags *pflag.FlagSet) {
@@ -31,6 +33,7 @@ func (opts *pushOpts) setup(flags *pflag.FlagSet) {
 	flags.BoolVar(&opts.DryRun, "dry-run", opts.DryRun, "If set, the push operation will be simulated, without actually creating or updating any resources")
 	flags.BoolVar(&opts.OmitManagerFields, "omit-manager-fields", opts.OmitManagerFields, "If set, the manager fields will not be appended to the resources")
 	flags.BoolVar(&opts.IncludeManaged, "include-managed", opts.IncludeManaged, "If set, resources managed by other tools will be included in the push operation")
+	flags.BoolVar(&opts.Sync, "sync", opts.Sync, "If set, resources present on the server but absent on disk will be deleted (dangerous)")
 }
 
 func (opts *pushOpts) Validate() error {
@@ -118,6 +121,17 @@ func pushCmd(configOpts *cmdconfig.Options) *cobra.Command {
 				return err
 			}
 
+			if opts.Sync {
+				for _, sel := range sels {
+					if sel.IsNamedSelector() {
+						return errors.New("--sync requires kind-only selectors (e.g. dashboards, folders), not named selectors (e.g. dashboards/foo)")
+					}
+				}
+				if alertsRequested && len(alertUIDs) != 0 {
+					return errors.New("--sync does not support alerts/<uid> selectors; use plain 'alerts' and manage which rules exist on disk")
+				}
+			}
+
 			reg, err := discovery.NewDefaultRegistry(ctx, cfg)
 			if err != nil {
 				return err
@@ -128,6 +142,11 @@ func pushCmd(configOpts *cmdconfig.Options) *cobra.Command {
 			})
 			if err != nil {
 				return err
+			}
+
+			supported := make(map[schema.GroupVersionKind]resources.Descriptor)
+			for _, d := range reg.SupportedResources() {
+				supported[d.GroupVersionKind()] = d
 			}
 
 			reader := local.FSReader{
@@ -190,12 +209,42 @@ func pushCmd(configOpts *cmdconfig.Options) *cobra.Command {
 				summary.FailedCount += afailed
 			}
 
+			deleted := 0
+			if opts.Sync {
+				// Delete remote resources that match the selectors, but are absent on disk.
+				dcount, fcount, err := syncDeleteResources(ctx, cfg, supported, filters, resourcesList, opts.MaxConcurrent, opts.StopOnError, opts.DryRun, opts.IncludeManaged)
+				if err != nil {
+					return err
+				}
+				deleted += dcount
+				summary.FailedCount += fcount
+
+				// Delete remote alert rules that are absent on disk.
+				if alertsRequested {
+					localCfg, err := configOpts.LoadConfig(ctx)
+					if err != nil {
+						return err
+					}
+					adc, afc, err := syncDeleteAlerts(ctx, localCfg.GetCurrentContext(), opts.Paths, opts.StopOnError, opts.DryRun)
+					if err != nil {
+						return err
+					}
+					deleted += adc
+					summary.FailedCount += afc
+				}
+			}
+
 			printer := cmdio.Success
 			if summary.FailedCount != 0 {
 				printer = cmdio.Warning
 				if summary.PushedCount == 0 {
 					printer = cmdio.Error
 				}
+			}
+
+			if opts.Sync {
+				printer(cmd.OutOrStdout(), "%d resources pushed, %d deleted, %d errors", summary.PushedCount, deleted, summary.FailedCount)
+				return nil
 			}
 
 			printer(cmd.OutOrStdout(), "%d resources pushed, %d errors", summary.PushedCount, summary.FailedCount)
