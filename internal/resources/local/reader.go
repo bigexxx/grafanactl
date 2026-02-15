@@ -118,6 +118,13 @@ func (reader *FSReader) Read(
 
 				// For directories, return nil to continue traversing
 				if info.IsDir() {
+					// Special-case directories that are not Kubernetes-style resources.
+					// For example, `resources/Alerts/` contains alert rule JSON/YAML from the
+					// provisioning API (no apiVersion/kind/metadata), and should not be fed
+					// into the generic resource decoder.
+					if info.Name() == "Alerts" {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 
