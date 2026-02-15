@@ -98,6 +98,16 @@ func pushCmd(configOpts *cmdconfig.Options) *cobra.Command {
 				return err
 			}
 
+			// Alerts are not (always) exposed via Grafana's discovery API, so we handle them separately
+			// via the alerting provisioning endpoints.
+			alertsRequested := len(args) == 0
+			var alertUIDs []string
+			if len(args) > 0 {
+				var other []string
+				alertsRequested, alertUIDs, other = splitAlertsSelectors(args)
+				args = other
+			}
+
 			cfg, err := configOpts.LoadRESTConfig(ctx)
 			if err != nil {
 				return err
@@ -159,6 +169,25 @@ func pushCmd(configOpts *cmdconfig.Options) *cobra.Command {
 			summary, err := pusher.Push(ctx, req)
 			if err != nil {
 				return err
+			}
+
+			// Push alert rules from <path>/Alerts/*.{json,yaml,yml}.
+			if alertsRequested {
+				localCfg, err := configOpts.LoadConfig(ctx)
+				if err != nil {
+					return err
+				}
+
+				// Currently we only support pushing all alert rule files on disk; UID filtering is only
+				// used for pull/get-style selectors.
+				_ = alertUIDs
+
+				apushed, afailed, err := pushAlerts(ctx, localCfg.GetCurrentContext(), opts.Paths, opts.StopOnError, opts.DryRun)
+				if err != nil {
+					return err
+				}
+				summary.PushedCount += apushed
+				summary.FailedCount += afailed
 			}
 
 			printer := cmdio.Success

@@ -67,7 +67,7 @@ func listCmd(configOpts *cmdconfig.Options) *cobra.Command {
 			// TODO: refactor this to return a k8s object list,
 			// e.g. APIResourceList, or unstructured.UnstructuredList.
 			// That way we can use the same code for rendering as for `resources get`.
-			res := reg.SupportedResources().Sorted()
+			res := appendSyntheticDescriptors(reg.SupportedResources()).Sorted()
 			return codec.Encode(cmd.OutOrStdout(), res)
 		},
 	}

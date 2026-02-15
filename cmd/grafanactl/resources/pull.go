@@ -94,7 +94,11 @@ func pullCmd(configOpts *cmdconfig.Options) *cobra.Command {
 
 	# Multiple resource kinds, long kind format with version:
 
-	grafanactl resources pull dashboards.v1alpha1.dashboard.grafana.app/foo folders.v1alpha1.folder.grafana.app/qux`,
+	grafanactl resources pull dashboards.v1alpha1.dashboard.grafana.app/foo folders.v1alpha1.folder.grafana.app/qux
+
+	# Alerts (provisioning API; writes one file per rule into Alerts/ under --path):
+
+	grafanactl resources pull alerts -o yaml`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
@@ -107,37 +111,57 @@ func pullCmd(configOpts *cmdconfig.Options) *cobra.Command {
 				return err
 			}
 
+			alertsRequested, alertUIDs, otherSelectors := splitAlertsSelectors(args)
+
 			cfg, err := configOpts.LoadRESTConfig(ctx)
 			if err != nil {
 				return err
 			}
 
-			res, err := fetchResources(cmd.Context(), fetchRequest{
-				Config: cfg,
-				// Strip server fields from the resources.
-				// This includes fields like `resourceVersion`, `uid`, etc.
-				Processors: []remote.Processor{
-					&process.ServerFieldsStripper{},
-				},
-				ExcludeManaged: !opts.IncludeManaged,
-				StopOnError:    opts.StopOnError,
-			}, args)
-			if err != nil {
-				return err
+			pulled := 0
+
+			if len(otherSelectors) > 0 || !alertsRequested {
+				res, err := fetchResources(cmd.Context(), fetchRequest{
+					Config: cfg,
+					// Strip server fields from the resources.
+					// This includes fields like `resourceVersion`, `uid`, etc.
+					Processors: []remote.Processor{
+						&process.ServerFieldsStripper{},
+					},
+					ExcludeManaged: !opts.IncludeManaged,
+					StopOnError:    opts.StopOnError,
+				}, otherSelectors)
+				if err != nil {
+					return err
+				}
+
+				writer := local.FSWriter{
+					Path:        opts.Path,
+					Namer:       local.GroupResourcesByKind(opts.IO.OutputFormat),
+					Encoder:     codec,
+					StopOnError: opts.StopOnError,
+				}
+
+				if err := writer.Write(ctx, &res.Resources); err != nil {
+					return err
+				}
+
+				pulled += res.Resources.Len()
 			}
 
-			writer := local.FSWriter{
-				Path:        opts.Path,
-				Namer:       local.GroupResourcesByKind(opts.IO.OutputFormat),
-				Encoder:     codec,
-				StopOnError: opts.StopOnError,
+			if alertsRequested {
+				cfg, err := configOpts.LoadConfig(ctx)
+				if err != nil {
+					return err
+				}
+				n, err := pullAlerts(ctx, cfg.GetCurrentContext(), opts.Path, opts.IO.OutputFormat, codec, alertUIDs)
+				if err != nil {
+					return err
+				}
+				pulled += n
 			}
 
-			if err := writer.Write(ctx, &res.Resources); err != nil {
-				return err
-			}
-
-			cmdio.Success(cmd.OutOrStdout(), "%d resources pulled", res.Resources.Len())
+			cmdio.Success(cmd.OutOrStdout(), "%d resources pulled", pulled)
 
 			return nil
 		},
