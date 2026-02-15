@@ -227,6 +227,11 @@ func (p *Pusher) pushSingleResource(
 		return nil
 	}
 
+	if shouldSkipPush(desc, name) {
+		logger.Info("Skipping resource that is not meant to be managed via push")
+		return nil
+	}
+
 	for _, processor := range request.Processors {
 		if err := processor.Process(res); err != nil {
 			summary.recordFailure(res, err)
@@ -295,6 +300,11 @@ func (p *Pusher) upsertResource(
 	// If the resource does not exist, create it.
 	if apierrors.IsNotFound(err) {
 		obj := src.ToUnstructured()
+		if shouldCreateWithEmptyName(desc) {
+			// Some Grafana APIs (notably alerting notifications resources) expect the server to derive
+			// the object name, and will reject requests where metadata.name is set.
+			obj.SetName("")
+		}
 		if _, err := p.client.Create(ctx, desc, &obj, metav1.CreateOptions{
 			DryRun: dryRunOpts,
 		}); err != nil {
@@ -307,6 +317,21 @@ func (p *Pusher) upsertResource(
 
 	// Some unknown error occurred, return it.
 	return err
+}
+
+func shouldCreateWithEmptyName(desc resources.Descriptor) bool {
+	// Grafana alerting notifications "k8s-ish" resources.
+	// Example error: 400 BadRequest: object's metadata.name should be empty
+	return desc.GroupVersion.Group == "notifications.alerting.grafana.app"
+}
+
+func shouldSkipPush(desc resources.Descriptor, name string) bool {
+	// Grafana-managed "default" resources that are not writable via this API.
+	if desc.GroupVersion.Group == "notifications.alerting.grafana.app" && name == "__default__" {
+		return true
+	}
+
+	return false
 }
 
 func (p *Pusher) supportedDescriptors() map[schema.GroupVersionKind]resources.Descriptor {

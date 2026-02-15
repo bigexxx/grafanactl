@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/goccy/go-yaml"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 type Format string
@@ -115,8 +116,20 @@ func (c *JSONCodec) Format() Format {
 }
 
 func (c *JSONCodec) Encode(dst io.Writer, value any) error {
+	// k8s unstructured types implement MarshalJSON, which uses the default json.Marshal
+	// behavior (including HTML escaping). Unwrap them so our encoder settings apply.
+	switch v := value.(type) {
+	case *unstructured.Unstructured:
+		value = v.Object
+	case unstructured.Unstructured:
+		value = v.Object
+	}
+
 	encoder := json.NewEncoder(dst)
 	encoder.SetIndent("", "  ")
+	// Avoid escaping HTML characters such as '&', '<', '>' so exported JSON is more readable
+	// and round-trips without surprising diffs.
+	encoder.SetEscapeHTML(false)
 
 	return encoder.Encode(value)
 }

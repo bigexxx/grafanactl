@@ -140,6 +140,104 @@ func TestPusher_Push_OnlyFolders(t *testing.T) {
 	req.Len(mockClient.operations, 2)
 }
 
+func TestPusher_Push_Create_AlertingNotifications_EmptyName(t *testing.T) {
+	req := require.New(t)
+
+	testResources := resources.NewResources(
+		resources.MustFromObject(map[string]any{
+			"apiVersion": "notifications.alerting.grafana.app/v0alpha1",
+			"kind":       "TemplateGroup",
+			"metadata": map[string]any{
+				"name":      "some-name",
+				"namespace": "default",
+			},
+			"spec": map[string]any{
+				"title":   "some-title",
+				"content": "hello",
+			},
+		}, resources.SourceInfo{}),
+	)
+
+	mockClient := &mockPushClient{
+		operations: []string{},
+		mu:         sync.Mutex{},
+	}
+
+	mockRegistry := &mockPushRegistry{
+		supportedResources: []resources.Descriptor{
+			{
+				GroupVersion: schema.GroupVersion{Group: "notifications.alerting.grafana.app", Version: "v0alpha1"},
+				Kind:         "TemplateGroup",
+				Singular:     "templategroup",
+				Plural:       "templategroups",
+			},
+		},
+	}
+
+	pusher := remote.NewPusher(mockClient, mockRegistry)
+
+	summary, err := pusher.Push(t.Context(), remote.PushRequest{
+		Resources:      testResources,
+		MaxConcurrency: 1,
+		IncludeManaged: true,
+	})
+
+	req.NoError(err)
+	req.Equal(1, summary.PushedCount)
+	req.Equal(0, summary.FailedCount)
+	req.Len(mockClient.createdNames, 1)
+	req.Equal("", mockClient.createdNames[0])
+}
+
+func TestPusher_Push_Skips_AlertingNotifications_DefaultResource(t *testing.T) {
+	req := require.New(t)
+
+	testResources := resources.NewResources(
+		resources.MustFromObject(map[string]any{
+			"apiVersion": "notifications.alerting.grafana.app/v0alpha1",
+			"kind":       "TemplateGroup",
+			"metadata": map[string]any{
+				"name":      "__default__",
+				"namespace": "default",
+			},
+			"spec": map[string]any{
+				"title":   "default_tg",
+				"content": "hello",
+			},
+		}, resources.SourceInfo{}),
+	)
+
+	mockClient := &mockPushClient{
+		operations: []string{},
+		mu:         sync.Mutex{},
+	}
+
+	mockRegistry := &mockPushRegistry{
+		supportedResources: []resources.Descriptor{
+			{
+				GroupVersion: schema.GroupVersion{Group: "notifications.alerting.grafana.app", Version: "v0alpha1"},
+				Kind:         "TemplateGroup",
+				Singular:     "templategroup",
+				Plural:       "templategroups",
+			},
+		},
+	}
+
+	pusher := remote.NewPusher(mockClient, mockRegistry)
+
+	summary, err := pusher.Push(t.Context(), remote.PushRequest{
+		Resources:      testResources,
+		MaxConcurrency: 1,
+		IncludeManaged: true,
+	})
+
+	req.NoError(err)
+	req.Equal(0, summary.PushedCount)
+	req.Equal(0, summary.FailedCount)
+	req.Len(mockClient.operations, 0)
+	req.Len(mockClient.createdNames, 0)
+}
+
 func TestPusher_Push_OnlyDashboards(t *testing.T) {
 	req := require.New(t)
 
@@ -679,6 +777,7 @@ type mockPushClient struct {
 	failureError      error
 	existingResources map[string]*unstructured.Unstructured
 	updatedObjects    map[string]*unstructured.Unstructured
+	createdNames      []string
 }
 
 func (m *mockPushClient) Create(
@@ -688,6 +787,7 @@ func (m *mockPushClient) Create(
 	defer m.mu.Unlock()
 
 	name := obj.GetName()
+	m.createdNames = append(m.createdNames, name)
 	m.operations = append(m.operations, "create-"+name)
 
 	if m.shouldFail != nil && m.shouldFail[name] {
